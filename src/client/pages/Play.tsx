@@ -80,6 +80,7 @@ export default function Play() {
     <>
       {q?.title && <p className="muted small question-title">{q.title}</p>}
       <h1>{q?.prompt}</h1>
+      {q?.image && <img className="question-image" src={q.image} alt="" />}
       {q?.description && <p className="muted">{q.description}</p>}
     </>
   );
@@ -210,11 +211,11 @@ export default function Play() {
       {data.status === "revealing" && q && (
         <div className="card">
           {questionHeading}
-          {data.results ? (
+          {q.type === "feedback" ? (
+            <p className="muted center">Thanks for your feedback!</p>
+          ) : data.results ? (
             <ResultsView results={data.results} question={q} />
-          ) : (
-            q.type === "feedback" && <p className="muted">Feedback is visible on the presenter&apos;s screen.</p>
-          )}
+          ) : null}
           {data.myResponse && data.myResponse.points > 0 && (
             <p className="center">You earned +{data.myResponse.points} points!</p>
           )}

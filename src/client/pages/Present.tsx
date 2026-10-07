@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link } from "react-router-dom";
 import QRCode from "react-qr-code";
 import { api } from "../api";
+import { downloadFile } from "../download";
 import { usePoll } from "../hooks/usePoll";
 import { FeedbackList, HiddenResults, Leaderboard, ResultsView } from "../components/Results";
 import type { ControlAction } from "../../shared/types";
@@ -69,9 +70,24 @@ export default function Present() {
   const joinUrl = `${window.location.origin}/join?code=${data.code}`;
   const q = data.currentQuestion;
   const isFeedback = q?.type === "feedback";
-  // Results come from the server only after reveal; before that the presenter
-  // sees the same hidden state as the audience.
-  const resultsVisible = !!data.results || isFeedback;
+  // Distribution/word frequencies come from the server only after reveal;
+  // options and the running vote count are always visible.
+  const resultsVisible = !!data.results;
+
+  const download = async (kind: "json" | "md") => {
+    try {
+      const url =
+        kind === "json"
+          ? api.exportUrl(data.code, presenterKey)
+          : api.resultsMarkdownUrl(data.code, presenterKey);
+      await downloadFile(
+        url,
+        kind === "json" ? `${data.code}-presentation.json` : `${data.code}-results.md`
+      );
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : "Download failed");
+    }
+  };
 
   return (
     <main className="container wide">
@@ -113,7 +129,18 @@ export default function Present() {
           {q.title && <p className="muted small question-title">{q.title}</p>}
           <h2>{q.prompt}</h2>
           {q.description && <p className="muted">{q.description}</p>}
-          <p className="muted small">{TYPE_LABELS[q.type]}</p>
+          {q.image && <img className="question-image" src={q.image} alt="" />}
+          <p className="muted small">
+            {TYPE_LABELS[q.type]} · {data.voteCount} vote{data.voteCount === 1 ? "" : "s"}
+          </p>
+
+          {!isFeedback && q.options && (
+            <ul className="option-list">
+              {q.options.map((opt, i) => (
+                <li key={i}>{opt}</li>
+              ))}
+            </ul>
+          )}
 
           {isFeedback ? (
             <FeedbackPanel code={data.code} presenterKey={presenterKey} questionId={q.id} />
@@ -158,16 +185,12 @@ export default function Present() {
       <div className="card">
         <h2>Export</h2>
         <div className="controls">
-          <a className="button secondary" href={api.exportUrl(data.code, presenterKey)} download>
+          <button className="secondary" onClick={() => download("json")}>
             Download presentation (JSON)
-          </a>
-          <a
-            className="button secondary"
-            href={api.resultsMarkdownUrl(data.code, presenterKey)}
-            download
-          >
+          </button>
+          <button className="secondary" onClick={() => download("md")}>
             Download results (Markdown)
-          </a>
+          </button>
         </div>
       </div>
 

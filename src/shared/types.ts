@@ -15,6 +15,8 @@ export interface QuestionInput {
   showLeaderboard?: boolean;
   /** wordcloud: allow multiple entries per participant */
   allowMultiple?: boolean;
+  /** quiz: image as a data URL (e.g. data:image/png;base64,…) */
+  image?: string;
 }
 
 export type PresentationStatus = "lobby" | "active" | "revealing" | "closed";
@@ -30,6 +32,7 @@ export interface PublicQuestion {
   timeLimitSec: number | null;
   showLeaderboard: boolean;
   allowMultiple: boolean;
+  image: string | null;
   /** Only present for the presenter or after reveal. */
   correctIndex?: number | null;
   /** Server timestamp (ms) when this question became active — for quiz countdown. */
@@ -73,6 +76,8 @@ export interface StateResponse {
   myResponse: MyResponse | null;
   myResponses?: MyResponse[] | null;
   results: Results | null;
+  /** Live vote count for the current question (visible before reveal). */
+  voteCount: number;
   leaderboard: LeaderboardEntry[] | null;
   /** Server time (ms) — clients use this to sync countdown timers. */
   serverTime: number;

@@ -39,6 +39,7 @@ interface QuestionRow {
   time_limit_sec: number | null;
   show_leaderboard: number;
   allow_multiple: number;
+  image: string | null;
 }
 
 interface ParticipantRow {
@@ -75,6 +76,38 @@ function passcodeOk(env: Bindings, provided: string | undefined): boolean {
   return diff === 0;
 }
 
+const PASSCODE_MAX_FAILURES = 5;
+const PASSCODE_LOCKOUT_MS = 5 * 60 * 1000;
+
+/** Returns null when the IP may proceed, or seconds until unlock. */
+async function passcodeLockedSeconds(db: D1Database, ip: string): Promise<number | null> {
+  const row = await db
+    .prepare("SELECT locked_until FROM passcode_attempts WHERE ip = ?")
+    .bind(ip)
+    .first<{ locked_until: number | null }>();
+  if (row?.locked_until && row.locked_until > Date.now()) {
+    return Math.ceil((row.locked_until - Date.now()) / 1000);
+  }
+  return null;
+}
+
+async function recordPasscodeFailure(db: D1Database, ip: string): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO passcode_attempts (ip, failures, locked_until) VALUES (?, 1, NULL)
+       ON CONFLICT(ip) DO UPDATE SET
+         failures = failures + 1,
+         locked_until = CASE WHEN failures + 1 >= ${PASSCODE_MAX_FAILURES}
+                             THEN ${Date.now()} + ${PASSCODE_LOCKOUT_MS} ELSE locked_until END`
+    )
+    .bind(ip)
+    .run();
+}
+
+async function clearPasscodeFailures(db: D1Database, ip: string): Promise<void> {
+  await db.prepare("DELETE FROM passcode_attempts WHERE ip = ?").bind(ip).run();
+}
+
 function validateQuestion(q: QuestionInput): string | null {
   if (!q || (q.type !== "mc" && q.type !== "quiz" && q.type !== "wordcloud" && q.type !== "feedback"))
     return "unknown type";
@@ -83,6 +116,11 @@ function validateQuestion(q: QuestionInput): string | null {
   if (q.title != null && (typeof q.title !== "string" || q.title.length > 120)) return "bad title";
   if (q.description != null && (typeof q.description !== "string" || q.description.length > 1000))
     return "bad description";
+  if (q.image != null) {
+    if (typeof q.image !== "string" || !q.image.startsWith("data:image/")) return "bad image";
+    // ~500KB base64 cap
+    if (q.image.length > 700_000) return "image too large";
+  }
   if (q.type === "mc" || q.type === "quiz") {
     if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 6)
       return "needs 2–6 options";
@@ -125,6 +163,7 @@ function toPublicQuestion(q: QuestionRow, reveal: boolean, startedAt: number | n
     timeLimitSec: q.time_limit_sec,
     showLeaderboard: !!q.show_leaderboard,
     allowMultiple: !!q.allow_multiple,
+    image: q.image,
     // Correct answer is never exposed before reveal — not even to the presenter.
     correctIndex: reveal ? q.correct_index : null,
     startedAt,
@@ -206,8 +245,8 @@ async function insertPresentation(
       db
         .prepare(
           `INSERT INTO questions
-             (presentation_code, idx, type, prompt, title, description, options, correct_index, time_limit_sec, show_leaderboard, allow_multiple)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             (presentation_code, idx, type, prompt, title, description, options, correct_index, time_limit_sec, show_leaderboard, allow_multiple, image)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .bind(
           code,
@@ -220,7 +259,8 @@ async function insertPresentation(
           q.correctIndex ?? null,
           q.timeLimitSec ?? null,
           q.showLeaderboard ? 1 : 0,
-          q.allowMultiple ? 1 : 0
+          q.allowMultiple ? 1 : 0,
+          q.image ?? null
         )
     ),
   ];
@@ -236,8 +276,16 @@ app.post("/api/presentations", async (c) => {
   const body = await c.req.json<CreatePresentationRequest>().catch(() => null);
   if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
     return c.json({ error: "invalid_body" }, 400);
-  if (!passcodeOk(c.env, body.passcode))
+
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const lockedFor = await passcodeLockedSeconds(c.env.DB, ip);
+  if (lockedFor != null)
+    return c.json({ error: "too_many_attempts", retryAfterSec: lockedFor }, 429);
+  if (!passcodeOk(c.env, body.passcode)) {
+    await recordPasscodeFailure(c.env.DB, ip);
     return c.json({ error: "invalid_passcode" }, 403);
+  }
+  await clearPasscodeFailures(c.env.DB, ip);
 
   const title = body.title.trim().slice(0, 120) || "Untitled";
   const qs = body.questions;
@@ -258,8 +306,16 @@ app.post("/api/presentations/import", async (c) => {
     .catch(() => null);
   if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
     return c.json({ error: "invalid_body" }, 400);
-  if (!passcodeOk(c.env, body.passcode))
+
+  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
+  const lockedFor = await passcodeLockedSeconds(c.env.DB, ip);
+  if (lockedFor != null)
+    return c.json({ error: "too_many_attempts", retryAfterSec: lockedFor }, 429);
+  if (!passcodeOk(c.env, body.passcode)) {
+    await recordPasscodeFailure(c.env.DB, ip);
     return c.json({ error: "invalid_passcode" }, 403);
+  }
+  await clearPasscodeFailures(c.env.DB, ip);
 
   const qs = body.questions;
   if (qs.length < 1 || qs.length > 20) return c.json({ error: "need 1–20 questions" }, 400);
@@ -299,6 +355,7 @@ app.get("/api/presentations/:code/export", async (c) => {
       timeLimitSec: q.time_limit_sec ?? undefined,
       showLeaderboard: !!q.show_leaderboard,
       allowMultiple: !!q.allow_multiple,
+      image: q.image ?? undefined,
     })),
   };
 
@@ -481,8 +538,22 @@ app.get("/api/presentations/:code/state", async (c) => {
       .first<QuestionRow>();
   }
 
-  // MC results are hidden from the presenter too until they reveal.
+  // Results (vote distribution / word frequencies) stay hidden until reveal,
+  // but the raw vote count is always visible. Feedback responses never appear
+  // in state — they are presenter-only (live panel + export).
   const reveal = p.status === "revealing" || p.status === "closed";
+  const isFeedbackQ = question?.type === "feedback";
+
+  let voteCount = 0;
+  if (question) {
+    voteCount =
+      (
+        await c.env.DB
+          .prepare("SELECT COUNT(*) AS n FROM responses WHERE question_id = ?")
+          .bind(question.id)
+          .first<{ n: number }>()
+      )?.n ?? 0;
+  }
 
   let myResponse: { value: string; points: number } | null = null;
   let myResponses: { value: string; points: number }[] | null = null;
@@ -503,7 +574,7 @@ app.get("/api/presentations/:code/state", async (c) => {
   }
 
   let results: Results | null = null;
-  if (question && reveal) results = await aggregate(c.env.DB, question);
+  if (question && reveal && !isFeedbackQ) results = await aggregate(c.env.DB, question);
 
   let leaderboard: LeaderboardEntry[] | null = null;
   if (question && question.show_leaderboard && reveal) {
@@ -530,6 +601,7 @@ app.get("/api/presentations/:code/state", async (c) => {
     myResponse,
     myResponses,
     results,
+    voteCount,
     leaderboard,
     serverTime: Date.now(),
   };

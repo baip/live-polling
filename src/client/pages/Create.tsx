@@ -29,6 +29,30 @@ const TYPE_LABELS: Record<QuestionType, string> = {
   feedback: "Feedback",
 };
 
+/** Read an image file, downscale to fit within `max` px, return a data URL. */
+function fileToDataUrl(file: File, max = 1024): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, max / Math.max(img.width, img.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.round(img.width * scale);
+      canvas.height = Math.round(img.height * scale);
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return reject(new Error("Canvas unavailable"));
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL("image/jpeg", 0.82));
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not read image"));
+    };
+    img.src = url;
+  });
+}
+
 export default function Create() {
   const [title, setTitle] = useState("My presentation");
   const [questions, setQuestions] = useState<DraftQuestion[]>([newQuestion("mc")]);
@@ -253,6 +277,39 @@ export default function Create() {
                 onChange={(e) => update(q.key, { timeLimitSec: Number(e.target.value) })}
               />
             </label>
+          )}
+
+          {q.type === "quiz" && (
+            <div className="field">
+              <span>Picture (optional)</span>
+              {q.image ? (
+                <div className="image-preview">
+                  <img src={q.image} alt="Question" />
+                  <button className="ghost" onClick={() => update(q.key, { image: undefined })}>
+                    Remove image
+                  </button>
+                </div>
+              ) : (
+                <label className="button secondary import-button">
+                  Upload image
+                  <input
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={async (e) => {
+                      const f = e.target.files?.[0];
+                      e.target.value = "";
+                      if (!f) return;
+                      try {
+                        update(q.key, { image: await fileToDataUrl(f) });
+                      } catch {
+                        setError("Could not process that image.");
+                      }
+                    }}
+                  />
+                </label>
+              )}
+            </div>
           )}
 
           {q.type === "wordcloud" && (
