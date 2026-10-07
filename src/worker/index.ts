@@ -12,8 +12,14 @@ import type {
 type Bindings = {
   DB: D1Database;
   ASSETS: Fetcher;
-  /** Optional. When set, creating/importing presentations requires this passcode. */
+  /** Optional. When set, passcode login is enabled for presenters. */
   PRESENTER_PASSCODE?: string;
+  /** Resend API key — enables email login when set. */
+  RESEND_API_KEY?: string;
+  /** From address for login emails, e.g. "Live Polling <polls@p.bai.group>". */
+  EMAIL_FROM?: string;
+  /** Comma-separated email allowlist for presenter login. */
+  PRESENTER_EMAILS?: string;
 };
 
 interface PresentationRow {
@@ -106,6 +112,73 @@ async function recordPasscodeFailure(db: D1Database, ip: string): Promise<void> 
 
 async function clearPasscodeFailures(db: D1Database, ip: string): Promise<void> {
   await db.prepare("DELETE FROM passcode_attempts WHERE ip = ?").bind(ip).run();
+}
+
+// ---------------------------------------------------------------------------
+// Presenter sessions: passcode or email-PIN login both yield a session token
+// that is required to create/import presentations.
+// ---------------------------------------------------------------------------
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const PIN_TTL_MS = 10 * 60 * 1000;
+const PIN_MAX_ATTEMPTS = 5;
+
+/** Parsed presenter email allowlist from the PRESENTER_EMAILS env var. */
+function emailAllowlist(env: Bindings): string[] {
+  return (env.PRESENTER_EMAILS ?? "")
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+async function sha256(text: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+  return Array.from(new Uint8Array(digest))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function createSession(db: D1Database, identity: string): Promise<string> {
+  const token = crypto.randomUUID();
+  const now = Date.now();
+  await db
+    .prepare("INSERT INTO presenter_sessions (token, identity, created_at, expires_at) VALUES (?, ?, ?, ?)")
+    .bind(token, identity, now, now + SESSION_TTL_MS)
+    .run();
+  // Opportunistic cleanup of expired rows.
+  await db.prepare("DELETE FROM presenter_sessions WHERE expires_at < ?").bind(now).run();
+  return token;
+}
+
+async function sessionValid(db: D1Database, token: string | undefined): Promise<boolean> {
+  if (!token) return false;
+  const row = await db
+    .prepare("SELECT expires_at FROM presenter_sessions WHERE token = ?")
+    .bind(token)
+    .first<{ expires_at: number }>();
+  return !!row && row.expires_at > Date.now();
+}
+
+async function sendLoginPin(env: Bindings, email: string, pin: string): Promise<boolean> {
+  if (!env.RESEND_API_KEY || !env.EMAIL_FROM) return false;
+  const res = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${env.RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: env.EMAIL_FROM,
+      to: [email],
+      subject: `${pin} — your Live Polling login code`,
+      text: `Your presenter login code is: ${pin}\n\nIt expires in 10 minutes. If you didn't request this, ignore this email.`,
+    }),
+  });
+  if (!res.ok) {
+    console.error(`resend_error ${res.status}: ${await res.text()}`);
+    return false;
+  }
+  return true;
 }
 
 function validateQuestion(q: QuestionInput): string | null {
@@ -272,20 +345,77 @@ async function insertPresentation(
 // Routes
 // ---------------------------------------------------------------------------
 
-app.post("/api/presentations", async (c) => {
-  const body = await c.req.json<CreatePresentationRequest>().catch(() => null);
-  if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
-    return c.json({ error: "invalid_body" }, 400);
+// ---------------------------------------------------------------------------
+// Presenter auth
+// ---------------------------------------------------------------------------
 
+app.post("/api/auth/passcode", async (c) => {
+  const body = await c.req.json<{ passcode?: string }>().catch(() => null);
   const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
   const lockedFor = await passcodeLockedSeconds(c.env.DB, ip);
   if (lockedFor != null)
     return c.json({ error: "too_many_attempts", retryAfterSec: lockedFor }, 429);
-  if (!passcodeOk(c.env, body.passcode)) {
+  if (!passcodeOk(c.env, body?.passcode) || !c.env.PRESENTER_PASSCODE) {
     await recordPasscodeFailure(c.env.DB, ip);
     return c.json({ error: "invalid_passcode" }, 403);
   }
   await clearPasscodeFailures(c.env.DB, ip);
+  const token = await createSession(c.env.DB, "passcode");
+  return c.json({ token }, 201);
+});
+
+app.post("/api/auth/email", async (c) => {
+  const body = await c.req.json<{ email?: string }>().catch(() => null);
+  const email = (body?.email ?? "").trim().toLowerCase();
+  // Generic response either way — don't reveal allowlist membership.
+  if (!emailAllowlist(c.env).includes(email))
+    return c.json({ error: "not_allowed" }, 403);
+
+  const pin = String(crypto.getRandomValues(new Uint32Array(1))[0] % 1_000_000).padStart(6, "0");
+  const sent = await sendLoginPin(c.env, email, pin);
+  if (!sent) return c.json({ error: "email_unavailable" }, 503);
+
+  await c.env.DB
+    .prepare(
+      `INSERT INTO email_login_codes (email, code_hash, expires_at, attempts) VALUES (?, ?, ?, 0)
+       ON CONFLICT(email) DO UPDATE SET code_hash = excluded.code_hash, expires_at = excluded.expires_at, attempts = 0`
+    )
+    .bind(email, await sha256(pin), Date.now() + PIN_TTL_MS)
+    .run();
+  return c.json({ ok: true }, 201);
+});
+
+app.post("/api/auth/verify", async (c) => {
+  const body = await c.req.json<{ email?: string; code?: string }>().catch(() => null);
+  const email = (body?.email ?? "").trim().toLowerCase();
+  const code = (body?.code ?? "").trim();
+
+  const row = await c.env.DB
+    .prepare("SELECT code_hash, expires_at, attempts FROM email_login_codes WHERE email = ?")
+    .bind(email)
+    .first<{ code_hash: string; expires_at: number; attempts: number }>();
+  if (!row || row.expires_at < Date.now() || row.attempts >= PIN_MAX_ATTEMPTS)
+    return c.json({ error: "invalid_code" }, 403);
+
+  if ((await sha256(code)) !== row.code_hash) {
+    await c.env.DB
+      .prepare("UPDATE email_login_codes SET attempts = attempts + 1 WHERE email = ?")
+      .bind(email)
+      .run();
+    return c.json({ error: "invalid_code" }, 403);
+  }
+
+  await c.env.DB.prepare("DELETE FROM email_login_codes WHERE email = ?").bind(email).run();
+  const token = await createSession(c.env.DB, email);
+  return c.json({ token }, 201);
+});
+
+app.post("/api/presentations", async (c) => {
+  const body = await c.req.json<CreatePresentationRequest>().catch(() => null);
+  if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
+    return c.json({ error: "invalid_body" }, 400);
+  if (!(await sessionValid(c.env.DB, body.presenterToken)))
+    return c.json({ error: "not_authenticated" }, 401);
 
   const title = body.title.trim().slice(0, 120) || "Untitled";
   const qs = body.questions;
@@ -302,20 +432,12 @@ app.post("/api/presentations", async (c) => {
 // Import a previously exported presentation (JSON format) as a brand-new session.
 app.post("/api/presentations/import", async (c) => {
   const body = await c.req
-    .json<{ title?: string; questions?: QuestionInput[]; passcode?: string }>()
+    .json<{ title?: string; questions?: QuestionInput[]; presenterToken?: string }>()
     .catch(() => null);
   if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
     return c.json({ error: "invalid_body" }, 400);
-
-  const ip = c.req.header("CF-Connecting-IP") ?? "unknown";
-  const lockedFor = await passcodeLockedSeconds(c.env.DB, ip);
-  if (lockedFor != null)
-    return c.json({ error: "too_many_attempts", retryAfterSec: lockedFor }, 429);
-  if (!passcodeOk(c.env, body.passcode)) {
-    await recordPasscodeFailure(c.env.DB, ip);
-    return c.json({ error: "invalid_passcode" }, 403);
-  }
-  await clearPasscodeFailures(c.env.DB, ip);
+  if (!(await sessionValid(c.env.DB, body.presenterToken)))
+    return c.json({ error: "not_authenticated" }, 401);
 
   const qs = body.questions;
   if (qs.length < 1 || qs.length > 20) return c.json({ error: "need 1–20 questions" }, 400);
@@ -473,9 +595,16 @@ app.get("/api/presentations/:code/feedback", async (c) => {
   return c.json({ responses: rows.results.map((r) => r.value) });
 });
 
-// Lets the client know whether a passcode is required (no secrets disclosed).
+// Lets the client know which presenter login methods are available.
 app.get("/api/config", (c) => {
-  return c.json({ requiresPasscode: !!c.env.PRESENTER_PASSCODE });
+  return c.json({
+    passcodeEnabled: !!c.env.PRESENTER_PASSCODE,
+    emailEnabled: !!(
+      c.env.RESEND_API_KEY &&
+      c.env.EMAIL_FROM &&
+      emailAllowlist(c.env).length > 0
+    ),
+  });
 });
 
 app.post("/api/presentations/:code/join", async (c) => {

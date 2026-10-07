@@ -1,3 +1,9 @@
 # Copy to .dev.vars for local development (gitignored).
-# When set, creating/importing presentations requires this passcode.
+# Presenter login: passcode and/or email PIN. At least one must be set for
+# the login page to offer that method; with neither, creation is open.
 PRESENTER_PASSCODE=dev-passcode
+# Email login via Resend (https://resend.com):
+# RESEND_API_KEY=re_...
+# EMAIL_FROM=Live Polling <polls@p.bai.group>
+# Comma-separated allowlist of presenter emails:
+# PRESENTER_EMAILS=pengbai@umass.edu, dandan@umass.edu

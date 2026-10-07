@@ -34,13 +34,13 @@ npm run dev                # http://localhost:5173
 
 ## Access control
 
-Presenter routes are guarded by two independent layers — either alone is sufficient,
-together they provide defense in depth:
+Presenter routes (`/login`, `/create`, `/present`) are gated. A presenter logs in with
+**either** method — both issue a 12-hour session token stored in the browser:
 
-### 1. Presenter passcode (in-app)
+### 1. Passcode
 
-When the `PRESENTER_PASSCODE` secret is set, creating or importing a presentation
-requires it. Audience join/play routes are unaffected — voting stays anonymous.
+Set the `PRESENTER_PASSCODE` secret; presenters enter it on the login page.
+Failed attempts are rate-limited per IP (5 tries → 5-minute lockout).
 
 ```bash
 # Local dev: put PRESENTER_PASSCODE=... in .dev.vars (see .dev.vars.example)
@@ -48,24 +48,31 @@ requires it. Audience join/play routes are unaffected — voting stays anonymous
 npx wrangler secret put PRESENTER_PASSCODE
 ```
 
-Without the secret, creation is open (useful for local development).
+### 2. Email PIN (allowlist)
 
-### 2. Cloudflare Access (edge, email allowlist) — recommended for production
+Presenters enter their email on the login page; if it's on the allowlist, a 6-digit
+code is sent via [Resend](https://resend.com). Codes expire after 10 minutes and 5
+wrong attempts. Configure with:
 
-Enforce an email allowlist before requests even reach the Worker:
+```bash
+npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put EMAIL_FROM         # e.g. "Live Polling <polls@p.bai.group>"
+npx wrangler secret put PRESENTER_EMAILS   # e.g. "pengbai@umass.edu, dandan@umass.edu"
+```
 
-1. In the Cloudflare dashboard, go to **Zero Trust → Access → Applications → Add**
-   and choose **Self-hosted**.
-2. Application domain: your hostname (e.g. `live-polling.bai.group`) or the
-   workers.dev URL; add **paths** `create`, `present*` — or protect the whole
-   domain and rely on session duration for the audience (simplest).
-3. Policy: **Allow** → **Emails** → list the allowed presenter addresses.
-4. Pick a login method (one-time email PIN works with zero setup; Google/GitHub
-   IdPs also work).
+`PRESENTER_EMAILS` is a comma-separated allowlist; update it anytime without touching
+code.
 
-The audience routes (`/join`, `/play`, `/api/presentations/*/join`, `/state`,
-`/respond`) stay open if you scope Access to the presenter paths. The Worker
-never sees unauthenticated presenter requests — Access rejects them at the edge.
+For local dev, copy `.dev.vars.example` to `.dev.vars` and fill in values.
+Without any secrets, creation is open (convenient for development).
+
+The audience never logs in — join/play/respond routes stay open and anonymous.
+
+### Optional: Cloudflare Access (edge layer)
+
+For an additional edge-level gate in front of `/create` and `/present*` pages,
+configure a self-hosted application in **Zero Trust → Access** with an email
+allowlist policy (see Cloudflare docs). This is independent of the in-app login.
 
 ## Usage
 

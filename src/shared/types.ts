@@ -86,8 +86,8 @@ export interface StateResponse {
 export interface CreatePresentationRequest {
   title: string;
   questions: QuestionInput[];
-  /** Required when the server has a presenter passcode configured. */
-  passcode?: string;
+  /** Presenter session token (from passcode or email login). */
+  presenterToken?: string;
 }
 
 export interface CreatePresentationResponse {

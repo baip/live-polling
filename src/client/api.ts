@@ -41,8 +41,26 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  /** Whether the server requires a presenter passcode for creation. */
-  getConfig: () => request<{ requiresPasscode: boolean }>("/api/config"),
+  /** Which presenter login methods the server has configured. */
+  getConfig: () => request<{ passcodeEnabled: boolean; emailEnabled: boolean }>("/api/config"),
+
+  loginPasscode: (passcode: string) =>
+    request<{ token: string }>("/api/auth/passcode", {
+      method: "POST",
+      body: JSON.stringify({ passcode }),
+    }),
+
+  requestEmailPin: (email: string) =>
+    request<{ ok: true }>("/api/auth/email", {
+      method: "POST",
+      body: JSON.stringify({ email }),
+    }),
+
+  verifyEmailPin: (email: string, code: string) =>
+    request<{ token: string }>("/api/auth/verify", {
+      method: "POST",
+      body: JSON.stringify({ email, code }),
+    }),
 
   /** URL that downloads the presentation definition as JSON (presenter only). */
   exportUrl: (code: string, presenterKey: string) =>

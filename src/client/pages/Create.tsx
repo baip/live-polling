@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { getPresenterToken } from "../auth";
 import type { QuestionInput, QuestionType } from "../../shared/types";
 
 interface DraftQuestion extends QuestionInput {
@@ -56,18 +57,44 @@ function fileToDataUrl(file: File, max = 1024): Promise<string> {
 export default function Create() {
   const [title, setTitle] = useState("My presentation");
   const [questions, setQuestions] = useState<DraftQuestion[]>([newQuestion("mc")]);
-  const [passcode, setPasscode] = useState("");
-  const [requiresPasscode, setRequiresPasscode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
-    api
-      .getConfig()
-      .then((cfg) => setRequiresPasscode(cfg.requiresPasscode))
-      .catch(() => {});
-  }, []);
+    if (!getPresenterToken()) navigate("/login?next=/create", { replace: true });
+  }, [navigate]);
+
+  const importFile = async (file: File) => {
+    setImportError(null);
+    setImporting(true);
+    try {
+      const parsed = JSON.parse(await file.text()) as {
+        title?: string;
+        questions?: unknown;
+      };
+      if (!parsed.title || !Array.isArray(parsed.questions))
+        throw new Error("Not a valid presentation file.");
+      const res = await api.importPresentation({
+        title: parsed.title,
+        questions: parsed.questions as never,
+        presenterToken: getPresenterToken() ?? undefined,
+      });
+      sessionStorage.setItem(`presenter:${res.code}`, res.presenterKey);
+      navigate(`/present/${res.code}`);
+    } catch (e) {
+      setImportError(
+        e instanceof Error && e.message === "not_authenticated"
+          ? "Your login has expired — please log in again."
+          : e instanceof Error
+            ? e.message
+            : "Import failed."
+      );
+      setImporting(false);
+    }
+  };
 
   const update = (key: number, patch: Partial<DraftQuestion>) =>
     setQuestions((qs) => qs.map((q) => (q.key === key ? { ...q, ...patch } : q)));
@@ -132,7 +159,7 @@ export default function Create() {
     try {
       const payload = {
         title: title.trim(),
-        passcode: passcode || undefined,
+        presenterToken: getPresenterToken() ?? undefined,
         questions: questions.map(({ key: _key, ...q }) => ({
           ...q,
           prompt: q.prompt.trim(),
@@ -146,8 +173,8 @@ export default function Create() {
       navigate(`/present/${res.code}`);
     } catch (e) {
       setError(
-        e instanceof Error && e.message === "invalid_passcode"
-          ? "Wrong presenter passcode."
+        e instanceof Error && e.message === "not_authenticated"
+          ? "Your login has expired — please log in again."
           : e instanceof Error
             ? e.message
             : "Failed to create presentation."
@@ -164,19 +191,6 @@ export default function Create() {
         <span>Title</span>
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} />
       </label>
-
-      {requiresPasscode && (
-        <label className="field">
-          <span>Presenter passcode</span>
-          <input
-            type="password"
-            value={passcode}
-            onChange={(e) => setPasscode(e.target.value)}
-            placeholder="Required to create presentations"
-            autoComplete="off"
-          />
-        </label>
-      )}
 
       {questions.map((q, qi) => (
         <section key={q.key} className="card">
@@ -353,6 +367,26 @@ export default function Create() {
       <button className="primary big" onClick={submit} disabled={submitting}>
         {submitting ? "Creating…" : "Create presentation"}
       </button>
+
+      <div className="card">
+        <h2>Import instead</h2>
+        <p className="muted small">Start a new session from an exported JSON file.</p>
+        <label className="button secondary import-button">
+          {importing ? "Importing…" : "Import from JSON"}
+          <input
+            type="file"
+            accept="application/json,.json"
+            hidden
+            disabled={importing}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void importFile(f);
+              e.target.value = "";
+            }}
+          />
+        </label>
+        {importError && <p className="error">{importError}</p>}
+      </div>
     </main>
   );
 }
