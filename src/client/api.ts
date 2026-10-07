@@ -41,6 +41,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** Whether the server requires a presenter passcode for creation. */
+  getConfig: () => request<{ requiresPasscode: boolean }>("/api/config"),
+
   /** URL that downloads the presentation definition as JSON (presenter only). */
   exportUrl: (code: string, presenterKey: string) =>
     `/api/presentations/${code}/export?presenterKey=${encodeURIComponent(presenterKey)}`,

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 
@@ -6,7 +6,16 @@ export default function Home() {
   const [code, setCode] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
   const [importing, setImporting] = useState(false);
+  const [passcode, setPasscode] = useState("");
+  const [requiresPasscode, setRequiresPasscode] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    api
+      .getConfig()
+      .then((cfg) => setRequiresPasscode(cfg.requiresPasscode))
+      .catch(() => {});
+  }, []);
 
   const importFile = async (file: File) => {
     setImportError(null);
@@ -21,11 +30,18 @@ export default function Home() {
       const res = await api.importPresentation({
         title: parsed.title,
         questions: parsed.questions as never,
+        passcode: passcode || undefined,
       });
       sessionStorage.setItem(`presenter:${res.code}`, res.presenterKey);
       navigate(`/present/${res.code}`);
     } catch (e) {
-      setImportError(e instanceof Error ? e.message : "Import failed.");
+      setImportError(
+        e instanceof Error && e.message === "invalid_passcode"
+          ? "Wrong presenter passcode."
+          : e instanceof Error
+            ? e.message
+            : "Import failed."
+      );
       setImporting(false);
     }
   };
@@ -66,6 +82,18 @@ export default function Home() {
         <p className="muted small" style={{ marginTop: 16 }}>
           …or import a previously exported presentation:
         </p>
+        {requiresPasscode && (
+          <label className="field">
+            <span>Presenter passcode</span>
+            <input
+              type="password"
+              value={passcode}
+              onChange={(e) => setPasscode(e.target.value)}
+              placeholder="Required to create or import"
+              autoComplete="off"
+            />
+          </label>
+        )}
         <label className="button secondary import-button">
           {importing ? "Importing…" : "Import from JSON"}
           <input

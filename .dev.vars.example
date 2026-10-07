@@ -1,0 +1,3 @@
+# Copy to .dev.vars for local development (gitignored).
+# When set, creating/importing presentations requires this passcode.
+PRESENTER_PASSCODE=dev-passcode

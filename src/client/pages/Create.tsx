@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { QuestionInput, QuestionType } from "../../shared/types";
@@ -32,9 +32,18 @@ const TYPE_LABELS: Record<QuestionType, string> = {
 export default function Create() {
   const [title, setTitle] = useState("My presentation");
   const [questions, setQuestions] = useState<DraftQuestion[]>([newQuestion("mc")]);
+  const [passcode, setPasscode] = useState("");
+  const [requiresPasscode, setRequiresPasscode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const navigate = useNavigate();
+
+  useEffect(() => {
+    api
+      .getConfig()
+      .then((cfg) => setRequiresPasscode(cfg.requiresPasscode))
+      .catch(() => {});
+  }, []);
 
   const update = (key: number, patch: Partial<DraftQuestion>) =>
     setQuestions((qs) => qs.map((q) => (q.key === key ? { ...q, ...patch } : q)));
@@ -99,6 +108,7 @@ export default function Create() {
     try {
       const payload = {
         title: title.trim(),
+        passcode: passcode || undefined,
         questions: questions.map(({ key: _key, ...q }) => ({
           ...q,
           prompt: q.prompt.trim(),
@@ -111,7 +121,13 @@ export default function Create() {
       sessionStorage.setItem(`presenter:${res.code}`, res.presenterKey);
       navigate(`/present/${res.code}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create presentation.");
+      setError(
+        e instanceof Error && e.message === "invalid_passcode"
+          ? "Wrong presenter passcode."
+          : e instanceof Error
+            ? e.message
+            : "Failed to create presentation."
+      );
       setSubmitting(false);
     }
   };
@@ -124,6 +140,19 @@ export default function Create() {
         <span>Title</span>
         <input value={title} onChange={(e) => setTitle(e.target.value)} maxLength={120} />
       </label>
+
+      {requiresPasscode && (
+        <label className="field">
+          <span>Presenter passcode</span>
+          <input
+            type="password"
+            value={passcode}
+            onChange={(e) => setPasscode(e.target.value)}
+            placeholder="Required to create presentations"
+            autoComplete="off"
+          />
+        </label>
+      )}
 
       {questions.map((q, qi) => (
         <section key={q.key} className="card">

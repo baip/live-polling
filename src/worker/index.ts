@@ -12,6 +12,8 @@ import type {
 type Bindings = {
   DB: D1Database;
   ASSETS: Fetcher;
+  /** Optional. When set, creating/importing presentations requires this passcode. */
+  PRESENTER_PASSCODE?: string;
 };
 
 interface PresentationRow {
@@ -59,6 +61,18 @@ function genCode(): string {
   let out = "";
   for (const b of bytes) out += CODE_ALPHABET[b % CODE_ALPHABET.length];
   return out;
+}
+
+/** Constant-time-ish passcode check. No-op when no passcode is configured. */
+function passcodeOk(env: Bindings, provided: string | undefined): boolean {
+  if (!env.PRESENTER_PASSCODE) return true;
+  if (typeof provided !== "string") return false;
+  const a = new TextEncoder().encode(provided);
+  const b = new TextEncoder().encode(env.PRESENTER_PASSCODE);
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a[i] ^ b[i];
+  return diff === 0;
 }
 
 function validateQuestion(q: QuestionInput): string | null {
@@ -222,6 +236,8 @@ app.post("/api/presentations", async (c) => {
   const body = await c.req.json<CreatePresentationRequest>().catch(() => null);
   if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
     return c.json({ error: "invalid_body" }, 400);
+  if (!passcodeOk(c.env, body.passcode))
+    return c.json({ error: "invalid_passcode" }, 403);
 
   const title = body.title.trim().slice(0, 120) || "Untitled";
   const qs = body.questions;
@@ -238,10 +254,12 @@ app.post("/api/presentations", async (c) => {
 // Import a previously exported presentation (JSON format) as a brand-new session.
 app.post("/api/presentations/import", async (c) => {
   const body = await c.req
-    .json<{ title?: string; questions?: QuestionInput[] }>()
+    .json<{ title?: string; questions?: QuestionInput[]; passcode?: string }>()
     .catch(() => null);
   if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
     return c.json({ error: "invalid_body" }, 400);
+  if (!passcodeOk(c.env, body.passcode))
+    return c.json({ error: "invalid_passcode" }, 403);
 
   const qs = body.questions;
   if (qs.length < 1 || qs.length > 20) return c.json({ error: "need 1–20 questions" }, 400);
@@ -396,6 +414,11 @@ app.get("/api/presentations/:code/feedback", async (c) => {
     .all<{ value: string }>();
 
   return c.json({ responses: rows.results.map((r) => r.value) });
+});
+
+// Lets the client know whether a passcode is required (no secrets disclosed).
+app.get("/api/config", (c) => {
+  return c.json({ requiresPasscode: !!c.env.PRESENTER_PASSCODE });
 });
 
 app.post("/api/presentations/:code/join", async (c) => {

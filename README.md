@@ -32,6 +32,41 @@ npm run dev                # http://localhost:5173
   and re-import it as a new session, and download full results as a Markdown report
 - Questions support an optional **title** and **description** in addition to the prompt
 
+## Access control
+
+Presenter routes are guarded by two independent layers — either alone is sufficient,
+together they provide defense in depth:
+
+### 1. Presenter passcode (in-app)
+
+When the `PRESENTER_PASSCODE` secret is set, creating or importing a presentation
+requires it. Audience join/play routes are unaffected — voting stays anonymous.
+
+```bash
+# Local dev: put PRESENTER_PASSCODE=... in .dev.vars (see .dev.vars.example)
+# Production:
+npx wrangler secret put PRESENTER_PASSCODE
+```
+
+Without the secret, creation is open (useful for local development).
+
+### 2. Cloudflare Access (edge, email allowlist) — recommended for production
+
+Enforce an email allowlist before requests even reach the Worker:
+
+1. In the Cloudflare dashboard, go to **Zero Trust → Access → Applications → Add**
+   and choose **Self-hosted**.
+2. Application domain: your hostname (e.g. `live-polling.bai.group`) or the
+   workers.dev URL; add **paths** `create`, `present*` — or protect the whole
+   domain and rely on session duration for the audience (simplest).
+3. Policy: **Allow** → **Emails** → list the allowed presenter addresses.
+4. Pick a login method (one-time email PIN works with zero setup; Google/GitHub
+   IdPs also work).
+
+The audience routes (`/join`, `/play`, `/api/presentations/*/join`, `/state`,
+`/respond`) stay open if you scope Access to the presenter paths. The Worker
+never sees unauthenticated presenter requests — Access rejects them at the edge.
+
 ## Usage
 
 1. Open the app, click **Create a presentation** (or import an exported JSON file),
