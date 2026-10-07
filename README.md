@@ -76,15 +76,16 @@ allowlist policy (see Cloudflare docs). This is independent of the in-app login.
 
 ## Usage
 
-1. Open the app, click **Create a presentation** (or import an exported JSON file),
-   add questions, and create.
-2. You're taken to the presenter console with a QR code and 6-character join code.
-   The presenter key is stored in that browser's session storage.
-3. Audience members open the join URL (or enter the code), pick a nickname — no
-   accounts. Each browser gets an anonymous participant id stored in localStorage.
-4. Press **Start session**, then **Reveal answers** / **Next question** to drive
-   the flow. Each participant can answer each question exactly once (except
-   multi-entry word clouds).
+**Presenter**: open the app → **Presenter login** → passcode or email PIN → build
+questions (or import an exported JSON) → **Create presentation**. You're taken to the
+presenter console with a QR code and 6-character join code; the presenter key is
+stored in that browser's session storage.
+
+**Audience**: open the join URL (or enter the code) → pick a nickname → answer.
+No accounts; each browser gets an anonymous participant id in localStorage.
+
+Drive the session with **Start session → Reveal answers → Next question**.
+Each participant answers each question once (except multi-entry word clouds).
 
 ## Deploy
 
@@ -96,19 +97,57 @@ npm run deploy
 
 ## Architecture
 
-- `src/worker/index.ts` — Hono API (create/import/export/results/join/state/
-  respond/control/feedback) running in the Worker; serves the built SPA via the
-  assets binding.
+- `src/worker/index.ts` — Hono API running in the Worker; serves the built SPA via
+  the assets binding. All routes under `/api`.
 - `src/client/` — React SPA (Vite). Polls `/api/.../state` every ~2s
   (5s in the lobby, paused while the tab is hidden). Quiz countdowns are synced
   to server time to avoid clock skew.
 - `src/shared/types.ts` — API payload types shared by both sides.
-- `migrations/` — D1 schema. Vote-once is enforced by the composite primary key
-  `(question_id, participant_id, seq)` on `responses` (`seq` is 0 for
-  single-answer questions; multi-entry word clouds use unique seq values).
-- Quiz scoring: 500 base points for a correct answer + up to 500 speed bonus,
-  computed server-side from the question start timestamp; answers after the time
-  limit (+2s grace) are rejected with `409 time_expired`.
+
+### Auth model
+
+Two independent identities, both anonymous-friendly:
+- **Presenter**: logs in via passcode or email PIN → 12-hour session token
+  (`presenter_sessions` table) required to create/import presentations. The token
+  is stored in browser localStorage (`presenter-token`). Per-presentation control
+  additionally uses a per-session `presenter_key` (sessionStorage), so a logged-in
+  presenter only controls sessions they created.
+- **Audience**: joins with a nickname → server-issued UUID (`participants` table)
+  stored in localStorage (`participant:CODE`). No login.
+
+### Data model (D1)
+
+- `presentations`: code (PK, 6-char join code), presenter_key, title,
+  status (lobby/active/revealing/closed), current_index, question_started_at
+- `questions`: type (mc|wordcloud|quiz|feedback), prompt, title, description,
+  options (JSON), correct_index, time_limit_sec, show_leaderboard, allow_multiple,
+  image (data URL, quiz only)
+- `participants`: id (UUID), presentation_code, nickname
+- `responses`: value, points, answered_at — PK `(question_id, participant_id, seq)`;
+  `seq = 0` for single-answer (enforces vote-once), unique seq for multi-entry
+  word clouds
+- `presenter_sessions`: token (PK), identity, expires_at (12h TTL)
+- `email_login_codes`: email (PK), code_hash (SHA-256), expires_at (10min), attempts
+- `passcode_attempts`: ip (PK), failures, locked_until (5 fails → 5min lockout)
+
+### API surface
+
+- `POST /api/auth/passcode` / `POST /api/auth/email` / `POST /api/auth/verify` — presenter login
+- `GET  /api/config` — which login methods are enabled
+- `POST /api/presentations` / `POST /api/presentations/import` — create (requires presenter token)
+- `GET  /api/presentations/:code/export` / `results.md` / `feedback` — presenter-only (key in query)
+- `POST /api/presentations/:code/join` / `respond` / `control`; `GET .../state`
+
+### Key behaviors
+
+- Results (vote distribution, word frequencies, quiz correct answer) are hidden
+  from everyone until the presenter reveals; the running vote count and options
+  are always visible. Feedback responses never appear in state — presenter panel
+  and Markdown export only.
+- Quiz scoring: 500 base + up to 500 speed bonus, computed server-side from the
+  question start timestamp; answers after the time limit (+2s grace) → `409 time_expired`.
+- Export/import uses a `live-polling/v1` JSON format; results export is Markdown.
+  Downloads use fetch→blob→object URL (see `src/client/download.ts`).
 
 ## Tests
 
@@ -118,10 +157,13 @@ With the dev server running:
 bash scripts/smoke.sh            # core flow: create/join/vote-once/reveal/close
 bash scripts/smoke-quiz.sh       # quiz scoring and reveal gating
 bash scripts/smoke-wordcloud.sh  # wordcloud normalization
-bash scripts/smoke-v2.sh         # v2: titles, leaderboard toggle, hidden results,
-                                 #     multi-entry, quiz timer, feedback, export/import
+bash scripts/smoke-v2.sh         # titles, leaderboard toggle, hidden results,
+                                 # multi-entry, quiz timer, feedback, export/import
+bash scripts/smoke-v3.sh         # rate limit, live vote counts, quiz image,
+                                 # hidden feedback, export content types
+bash scripts/smoke-auth.sh       # presenter login: passcode + email PIN + token gating
 ```
 
-All scripts accept `BASE=<url>` to run against production.
-
-See [PLAN.md](PLAN.md) for the design decisions and known limits.
+All scripts accept `BASE=<url>` (default `http://localhost:5173`) and some need
+`PASS=<passcode>` (default `dev-passcode`). v3's rate-limit test locks the local
+test IP, then clears it via a local D1 query — it skips that step against prod.
