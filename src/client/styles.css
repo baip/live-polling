@@ -133,6 +133,36 @@ input:focus {
   margin-bottom: 12px;
 }
 
+.textarea {
+  width: 100%;
+  background: var(--surface-2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 12px 14px;
+  font-size: 1rem;
+  font-family: inherit;
+  resize: vertical;
+}
+
+.textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.checkbox-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.checkbox-field input {
+  width: auto;
+}
+
 /* Buttons */
 
 button,
@@ -234,8 +264,10 @@ button:disabled {
 
 .join-box svg {
   background: white;
-  padding: 6px;
-  border-radius: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  width: 180px;
+  height: 180px;
 }
 
 .join-code {
@@ -292,6 +324,77 @@ button:disabled {
   display: flex;
   gap: 8px;
   margin-top: 16px;
+}
+
+.word-form-col {
+  margin-top: 8px;
+}
+
+.entry-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chip {
+  background: var(--surface-2);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 0.85rem;
+}
+
+.countdown {
+  text-align: center;
+  font-size: 2.2rem;
+  font-weight: 800;
+  margin: 4px 0 12px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+.countdown.low {
+  color: var(--danger);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.countdown.expired {
+  color: var(--muted);
+}
+
+.hidden-results {
+  text-align: center;
+  padding: 32px 0;
+  border: 2px dashed rgba(255, 255, 255, 0.12);
+  border-radius: 12px;
+  margin: 16px 0;
+}
+
+.feedback-list {
+  list-style: none;
+  margin: 12px 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.feedback-list li {
+  background: var(--surface-2);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.question-title {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.import-button {
+  display: inline-block;
+  cursor: pointer;
 }
 
 .spinner {

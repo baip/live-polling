@@ -30,9 +30,13 @@ interface QuestionRow {
   idx: number;
   type: QuestionType;
   prompt: string;
+  title: string | null;
+  description: string | null;
   options: string | null;
   correct_index: number | null;
   time_limit_sec: number | null;
+  show_leaderboard: number;
+  allow_multiple: number;
 }
 
 interface ParticipantRow {
@@ -58,9 +62,13 @@ function genCode(): string {
 }
 
 function validateQuestion(q: QuestionInput): string | null {
-  if (!q || (q.type !== "mc" && q.type !== "quiz" && q.type !== "wordcloud")) return "unknown type";
+  if (!q || (q.type !== "mc" && q.type !== "quiz" && q.type !== "wordcloud" && q.type !== "feedback"))
+    return "unknown type";
   if (typeof q.prompt !== "string" || q.prompt.trim().length === 0 || q.prompt.length > 300)
     return "bad prompt";
+  if (q.title != null && (typeof q.title !== "string" || q.title.length > 120)) return "bad title";
+  if (q.description != null && (typeof q.description !== "string" || q.description.length > 1000))
+    return "bad description";
   if (q.type === "mc" || q.type === "quiz") {
     if (!Array.isArray(q.options) || q.options.length < 2 || q.options.length > 6)
       return "needs 2–6 options";
@@ -85,7 +93,28 @@ function validateQuestion(q: QuestionInput): string | null {
 }
 
 async function getPresentation(db: D1Database, code: string): Promise<PresentationRow | null> {
-  return db.prepare("SELECT * FROM presentations WHERE code = ?").bind(code).first<PresentationRow>();
+  return db
+    .prepare("SELECT * FROM presentations WHERE code = ?")
+    .bind(code)
+    .first<PresentationRow>();
+}
+
+function toPublicQuestion(q: QuestionRow, reveal: boolean, startedAt: number | null) {
+  return {
+    id: q.id,
+    idx: q.idx,
+    type: q.type,
+    prompt: q.prompt,
+    title: q.title,
+    description: q.description,
+    options: q.options ? (JSON.parse(q.options) as string[]) : null,
+    timeLimitSec: q.time_limit_sec,
+    showLeaderboard: !!q.show_leaderboard,
+    allowMultiple: !!q.allow_multiple,
+    // Correct answer is never exposed before reveal — not even to the presenter.
+    correctIndex: reveal ? q.correct_index : null,
+    startedAt,
+  };
 }
 
 async function aggregate(db: D1Database, q: QuestionRow): Promise<Results> {
@@ -136,6 +165,55 @@ async function getLeaderboard(db: D1Database, code: string): Promise<Leaderboard
   return rows.results;
 }
 
+async function insertPresentation(
+  db: D1Database,
+  title: string,
+  qs: QuestionInput[]
+): Promise<{ code: string; presenterKey: string }> {
+  const presenterKey = crypto.randomUUID();
+  const now = Date.now();
+  let code = "";
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = genCode();
+    const clash = await db
+      .prepare("SELECT code FROM presentations WHERE code = ?")
+      .bind(code)
+      .first();
+    if (!clash) break;
+  }
+
+  const stmts = [
+    db
+      .prepare(
+        "INSERT INTO presentations (code, presenter_key, title, status, current_index, created_at) VALUES (?, ?, ?, 'lobby', -1, ?)"
+      )
+      .bind(code, presenterKey, title, now),
+    ...qs.map((q, i) =>
+      db
+        .prepare(
+          `INSERT INTO questions
+             (presentation_code, idx, type, prompt, title, description, options, correct_index, time_limit_sec, show_leaderboard, allow_multiple)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(
+          code,
+          i,
+          q.type,
+          q.prompt.trim(),
+          q.title?.trim() || null,
+          q.description?.trim() || null,
+          q.options ? JSON.stringify(q.options.map((o) => o.trim())) : null,
+          q.correctIndex ?? null,
+          q.timeLimitSec ?? null,
+          q.showLeaderboard ? 1 : 0,
+          q.allowMultiple ? 1 : 0
+        )
+    ),
+  ];
+  await db.batch(stmts);
+  return { code, presenterKey };
+}
+
 // ---------------------------------------------------------------------------
 // Routes
 // ---------------------------------------------------------------------------
@@ -153,43 +231,171 @@ app.post("/api/presentations", async (c) => {
     if (problem) return c.json({ error: `invalid question: ${problem}` }, 400);
   }
 
-  const presenterKey = crypto.randomUUID();
-  const now = Date.now();
-  let code = "";
-  for (let attempt = 0; attempt < 5; attempt++) {
-    code = genCode();
-    const clash = await c.env.DB
-      .prepare("SELECT code FROM presentations WHERE code = ?")
-      .bind(code)
-      .first();
-    if (!clash) break;
+  const result = await insertPresentation(c.env.DB, title, qs);
+  return c.json(result, 201);
+});
+
+// Import a previously exported presentation (JSON format) as a brand-new session.
+app.post("/api/presentations/import", async (c) => {
+  const body = await c.req
+    .json<{ title?: string; questions?: QuestionInput[] }>()
+    .catch(() => null);
+  if (!body || typeof body.title !== "string" || !Array.isArray(body.questions))
+    return c.json({ error: "invalid_body" }, 400);
+
+  const qs = body.questions;
+  if (qs.length < 1 || qs.length > 20) return c.json({ error: "need 1–20 questions" }, 400);
+  for (const q of qs) {
+    const problem = validateQuestion(q);
+    if (problem) return c.json({ error: `invalid question: ${problem}` }, 400);
   }
 
-  const stmts = [
-    c.env.DB
-      .prepare(
-        "INSERT INTO presentations (code, presenter_key, title, status, current_index, created_at) VALUES (?, ?, ?, 'lobby', -1, ?)"
-      )
-      .bind(code, presenterKey, title, now),
-    ...qs.map((q, i) =>
-      c.env.DB
-        .prepare(
-          "INSERT INTO questions (presentation_code, idx, type, prompt, options, correct_index, time_limit_sec) VALUES (?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(
-          code,
-          i,
-          q.type,
-          q.prompt.trim(),
-          q.options ? JSON.stringify(q.options.map((o) => o.trim())) : null,
-          q.correctIndex ?? null,
-          q.timeLimitSec ?? null
-        )
-    ),
-  ];
-  await c.env.DB.batch(stmts);
+  const result = await insertPresentation(c.env.DB, body.title.trim().slice(0, 120) || "Imported", qs);
+  return c.json(result, 201);
+});
 
-  return c.json({ code, presenterKey }, 201);
+// Export the presentation definition (questions only, no responses) as JSON.
+app.get("/api/presentations/:code/export", async (c) => {
+  const code = c.req.param("code").toUpperCase();
+  const presenterKey = c.req.query("presenterKey") ?? "";
+  const p = await getPresentation(c.env.DB, code);
+  if (!p) return c.json({ error: "not_found" }, 404);
+  if (presenterKey !== p.presenter_key) return c.json({ error: "forbidden" }, 403);
+
+  const questions = await c.env.DB
+    .prepare("SELECT * FROM questions WHERE presentation_code = ? ORDER BY idx")
+    .bind(code)
+    .all<QuestionRow>();
+
+  const exportData = {
+    format: "live-polling/v1",
+    title: p.title,
+    exportedAt: new Date().toISOString(),
+    questions: questions.results.map((q) => ({
+      type: q.type,
+      prompt: q.prompt,
+      title: q.title,
+      description: q.description,
+      options: q.options ? (JSON.parse(q.options) as string[]) : undefined,
+      correctIndex: q.correct_index ?? undefined,
+      timeLimitSec: q.time_limit_sec ?? undefined,
+      showLeaderboard: !!q.show_leaderboard,
+      allowMultiple: !!q.allow_multiple,
+    })),
+  };
+
+  return c.json(exportData, 200, {
+    "Content-Disposition": `attachment; filename="${code}-presentation.json"`,
+  });
+});
+
+// Export full results as a Markdown report.
+app.get("/api/presentations/:code/results.md", async (c) => {
+  const code = c.req.param("code").toUpperCase();
+  const presenterKey = c.req.query("presenterKey") ?? "";
+  const p = await getPresentation(c.env.DB, code);
+  if (!p) return c.json({ error: "not_found" }, 404);
+  if (presenterKey !== p.presenter_key) return c.json({ error: "forbidden" }, 403);
+
+  const questions = await c.env.DB
+    .prepare("SELECT * FROM questions WHERE presentation_code = ? ORDER BY idx")
+    .bind(code)
+    .all<QuestionRow>();
+
+  const participantCount =
+    (
+      await c.env.DB
+        .prepare("SELECT COUNT(*) AS n FROM participants WHERE presentation_code = ?")
+        .bind(code)
+        .first<{ n: number }>()
+    )?.n ?? 0;
+
+  const lines: string[] = [
+    `# ${p.title}`,
+    "",
+    `- Session code: **${p.code}**`,
+    `- Participants: **${participantCount}**`,
+    `- Exported: ${new Date().toISOString()}`,
+    "",
+  ];
+
+  for (const q of questions.results) {
+    lines.push(`## ${q.idx + 1}. ${q.title || q.prompt}`);
+    if (q.title) lines.push("", `> ${q.prompt}`);
+    if (q.description) lines.push("", q.description);
+    lines.push("");
+
+    const results = await aggregate(c.env.DB, q);
+    if (q.type === "wordcloud") {
+      if (results.kind === "words" && results.words.length > 0) {
+        lines.push("| Word | Count |", "|---|---|");
+        for (const w of results.words) lines.push(`| ${w.text} | ${w.count} |`);
+      } else {
+        lines.push("_No responses._");
+      }
+    } else if (q.type === "feedback") {
+      const rows = await c.env.DB
+        .prepare("SELECT value, answered_at FROM responses WHERE question_id = ? ORDER BY answered_at")
+        .bind(q.id)
+        .all<{ value: string; answered_at: number }>();
+      if (rows.results.length === 0) {
+        lines.push("_No feedback._");
+      } else {
+        for (const r of rows.results) lines.push(`- ${r.value}`);
+      }
+    } else {
+      const options = q.options ? (JSON.parse(q.options) as string[]) : [];
+      if (results.kind === "choice") {
+        lines.push("| Option | Votes |", "|---|---|");
+        options.forEach((opt, i) => {
+          const marker = q.type === "quiz" && i === q.correct_index ? " ✓" : "";
+          lines.push(`| ${opt}${marker} | ${results.counts[i]} |`);
+        });
+        lines.push("", `**Total votes: ${results.total}**`);
+      }
+    }
+    lines.push("");
+  }
+
+  const lb = await getLeaderboard(c.env.DB, code);
+  const hasQuiz = questions.results.some((q) => q.type === "quiz");
+  if (hasQuiz && lb.some((e) => e.score > 0)) {
+    lines.push("## Leaderboard", "", "| Rank | Nickname | Score |", "|---|---|---|");
+    lb.filter((e) => e.score > 0).forEach((e, i) => {
+      lines.push(`| ${i + 1} | ${e.nickname} | ${e.score} |`);
+    });
+    lines.push("");
+  }
+
+  return new Response(lines.join("\n"), {
+    headers: {
+      "Content-Type": "text/markdown; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${code}-results.md"`,
+    },
+  });
+});
+
+// Presenter-only: raw feedback responses for a question (no aggregation).
+app.get("/api/presentations/:code/feedback", async (c) => {
+  const code = c.req.param("code").toUpperCase();
+  const presenterKey = c.req.query("presenterKey") ?? "";
+  const questionId = Number(c.req.query("questionId"));
+
+  const p = await getPresentation(c.env.DB, code);
+  if (!p) return c.json({ error: "not_found" }, 404);
+  if (presenterKey !== p.presenter_key) return c.json({ error: "forbidden" }, 403);
+
+  const rows = await c.env.DB
+    .prepare(
+      `SELECT r.value FROM responses r
+       JOIN questions q ON q.id = r.question_id
+       WHERE q.presentation_code = ? AND r.question_id = ?
+       ORDER BY r.answered_at`
+    )
+    .bind(code, questionId)
+    .all<{ value: string }>();
+
+  return c.json({ responses: rows.results.map((r) => r.value) });
 });
 
 app.post("/api/presentations/:code/join", async (c) => {
@@ -252,28 +458,42 @@ app.get("/api/presentations/:code/state", async (c) => {
       .first<QuestionRow>();
   }
 
-  const reveal = isPresenter || p.status === "revealing" || p.status === "closed";
+  // MC results are hidden from the presenter too until they reveal.
+  const reveal = p.status === "revealing" || p.status === "closed";
 
   let myResponse: { value: string; points: number } | null = null;
+  let myResponses: { value: string; points: number }[] | null = null;
   if (participant && question) {
-    myResponse = await c.env.DB
-      .prepare("SELECT value, points FROM responses WHERE question_id = ? AND participant_id = ?")
-      .bind(question.id, participant.id)
-      .first<{ value: string; points: number }>();
+    if (question.type === "wordcloud" && question.allow_multiple) {
+      const rows = await c.env.DB
+        .prepare("SELECT value, points FROM responses WHERE question_id = ? AND participant_id = ?")
+        .bind(question.id, participant.id)
+        .all<{ value: string; points: number }>();
+      myResponses = rows.results;
+      myResponse = rows.results[0] ?? null;
+    } else {
+      myResponse = await c.env.DB
+        .prepare("SELECT value, points FROM responses WHERE question_id = ? AND participant_id = ?")
+        .bind(question.id, participant.id)
+        .first<{ value: string; points: number }>();
+    }
   }
 
   let results: Results | null = null;
   if (question && reveal) results = await aggregate(c.env.DB, question);
 
   let leaderboard: LeaderboardEntry[] | null = null;
-  const quizCount =
-    (
-      await c.env.DB
-        .prepare("SELECT COUNT(*) AS n FROM questions WHERE presentation_code = ? AND type = 'quiz'")
-        .bind(code)
-        .first<{ n: number }>()
-    )?.n ?? 0;
-  if (quizCount > 0 && reveal) leaderboard = await getLeaderboard(c.env.DB, code);
+  if (question && question.show_leaderboard && reveal) {
+    leaderboard = await getLeaderboard(c.env.DB, code);
+  } else if (p.status === "closed") {
+    const anyLb = await c.env.DB
+      .prepare(
+        "SELECT COUNT(*) AS n FROM questions WHERE presentation_code = ? AND show_leaderboard = 1"
+      )
+      .bind(code)
+      .first<{ n: number }>();
+    if ((anyLb?.n ?? 0) > 0) leaderboard = await getLeaderboard(c.env.DB, code);
+  }
 
   const body: StateResponse = {
     code: p.code,
@@ -283,20 +503,12 @@ app.get("/api/presentations/:code/state", async (c) => {
     questionCount,
     participantCount,
     isPresenter,
-    currentQuestion: question
-      ? {
-          id: question.id,
-          idx: question.idx,
-          type: question.type,
-          prompt: question.prompt,
-          options: question.options ? (JSON.parse(question.options) as string[]) : null,
-          timeLimitSec: question.time_limit_sec,
-          correctIndex: reveal ? question.correct_index : null,
-        }
-      : null,
+    currentQuestion: question ? toPublicQuestion(question, reveal, p.question_started_at) : null,
     myResponse,
+    myResponses,
     results,
     leaderboard,
+    serverTime: Date.now(),
   };
   return c.json(body);
 });
@@ -325,11 +537,19 @@ app.post("/api/presentations/:code/respond", async (c) => {
     .first<ParticipantRow>();
   if (!participant) return c.json({ error: "unknown_participant" }, 403);
 
+  // Enforce the quiz time limit server-side (with a small grace window for latency).
+  if (q.type === "quiz" && q.time_limit_sec != null && p.question_started_at != null) {
+    const elapsed = (Date.now() - p.question_started_at) / 1000;
+    if (elapsed > q.time_limit_sec + 2) return c.json({ error: "time_expired" }, 409);
+  }
+
   let value: string;
   let points = 0;
-  if (q.type === "wordcloud") {
+  if (q.type === "wordcloud" || q.type === "feedback") {
     if (typeof body.value !== "string") return c.json({ error: "invalid_value" }, 400);
-    value = body.value.trim().toLowerCase().slice(0, 40);
+    value = q.type === "wordcloud"
+      ? body.value.trim().toLowerCase().slice(0, 40)
+      : body.value.trim().slice(0, 500);
     if (!value) return c.json({ error: "invalid_value" }, 400);
   } else {
     const idx = typeof body.value === "number" ? body.value : Number(body.value);
@@ -345,9 +565,28 @@ app.post("/api/presentations/:code/respond", async (c) => {
     }
   }
 
+  // Multi-entry word clouds skip the vote-once constraint by using a unique seq.
+  if (q.type === "wordcloud" && q.allow_multiple) {
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const seq = attempt === 0 ? Math.floor(Math.random() * 1e9) + 1 : Math.floor(Math.random() * 1e9) + 1;
+      try {
+        await c.env.DB
+          .prepare(
+            "INSERT INTO responses (question_id, participant_id, seq, value, points, answered_at) VALUES (?, ?, ?, ?, ?, ?)"
+          )
+          .bind(q.id, participant.id, seq, value, points, Date.now())
+          .run();
+        return c.json({ ok: true, points }, 201);
+      } catch {
+        // seq collision — retry
+      }
+    }
+    return c.json({ error: "internal_error" }, 500);
+  }
+
   const res = await c.env.DB
     .prepare(
-      "INSERT OR IGNORE INTO responses (question_id, participant_id, value, points, answered_at) VALUES (?, ?, ?, ?, ?)"
+      "INSERT OR IGNORE INTO responses (question_id, participant_id, seq, value, points, answered_at) VALUES (?, ?, 0, ?, ?, ?)"
     )
     .bind(q.id, participant.id, value, points, Date.now())
     .run();

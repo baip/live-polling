@@ -35,6 +35,20 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  importPresentation: (body: CreatePresentationRequest) =>
+    request<CreatePresentationResponse>("/api/presentations/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+
+  /** URL that downloads the presentation definition as JSON (presenter only). */
+  exportUrl: (code: string, presenterKey: string) =>
+    `/api/presentations/${code}/export?presenterKey=${encodeURIComponent(presenterKey)}`,
+
+  /** URL that downloads results as a Markdown report (presenter only). */
+  resultsMarkdownUrl: (code: string, presenterKey: string) =>
+    `/api/presentations/${code}/results.md?presenterKey=${encodeURIComponent(presenterKey)}`,
+
   join: (code: string, nickname: string) =>
     request<JoinResponse>(`/api/presentations/${code}/join`, {
       method: "POST",

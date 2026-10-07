@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Navigate } from "react-router-dom";
 import { api, ApiError } from "../api";
 import { usePoll } from "../hooks/usePoll";
+import { useCountdown } from "../hooks/useCountdown";
 import { Leaderboard, ResultsView } from "../components/Results";
 
 export default function Play() {
@@ -16,11 +17,19 @@ export default function Play() {
   );
   const [answeredQ, setAnsweredQ] = useState<number | null>(null);
   const [earned, setEarned] = useState<number | null>(null);
-  const [word, setWord] = useState("");
+  const [text, setText] = useState("");
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   const q = data?.currentQuestion ?? null;
   const qid = q?.id ?? null;
+
+  const countdown = useCountdown(
+    q?.type === "quiz" ? q.startedAt : null,
+    q?.type === "quiz" ? q.timeLimitSec : null,
+    data?.serverTime
+  );
+  const timeUp = countdown !== null && countdown <= 0;
 
   useEffect(() => {
     setIntervalMs(data?.status === "lobby" ? 5000 : 2000);
@@ -28,8 +37,9 @@ export default function Play() {
 
   useEffect(() => {
     setEarned(null);
-    setWord("");
+    setText("");
     setSubmitError(null);
+    setSubmitting(false);
   }, [qid]);
 
   if (!participantId) return <Navigate to={`/join?code=${code}`} replace />;
@@ -41,23 +51,38 @@ export default function Play() {
     );
   }
 
-  const answered = (!!q && answeredQ === q.id) || !!data.myResponse;
+  const multiEntry = q?.type === "wordcloud" && q.allowMultiple;
+  const answered = (!!q && answeredQ === q.id && !multiEntry) || (!!data.myResponse && !multiEntry);
+  const entries = data.myResponses ?? [];
 
   const submit = async (value: string | number) => {
-    if (!q) return;
+    if (!q || submitting) return;
     setSubmitError(null);
+    setSubmitting(true);
     try {
       const res = await api.respond(code, { participantId, questionId: q.id, value });
       setAnsweredQ(q.id);
       setEarned(res.points);
+      if (multiEntry) setText("");
     } catch (e) {
       if (e instanceof ApiError && e.status === 409) {
         setAnsweredQ(q.id);
+        if (e.message === "time_expired") setSubmitError("Time is up!");
       } else {
         setSubmitError(e instanceof Error ? e.message : "Submit failed");
       }
+    } finally {
+      setSubmitting(false);
     }
   };
+
+  const questionHeading = (
+    <>
+      {q?.title && <p className="muted small question-title">{q.title}</p>}
+      <h1>{q?.prompt}</h1>
+      {q?.description && <p className="muted">{q.description}</p>}
+    </>
+  );
 
   return (
     <main className="container narrow">
@@ -76,35 +101,75 @@ export default function Play() {
         </div>
       )}
 
-      {data.status === "active" && q && !answered && (
+      {data.status === "active" && q && q.type === "quiz" && (
+        <div className={`countdown ${timeUp ? "expired" : countdown !== null && countdown <= 5 ? "low" : ""}`}>
+          {countdown !== null ? `${countdown}s` : ""}
+        </div>
+      )}
+
+      {data.status === "active" && q && !answered && !timeUp && (
         <div className="card">
           <p className="muted small">
             Question {data.currentIndex + 1} of {data.questionCount}
           </p>
-          <h1>{q.prompt}</h1>
-          {q.type === "wordcloud" ? (
-            <form
-              className="word-form"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (word.trim()) void submit(word);
-              }}
-            >
-              <input
-                value={word}
-                onChange={(e) => setWord(e.target.value)}
-                maxLength={40}
-                placeholder="Type one or two words…"
-                autoFocus
-              />
-              <button className="primary" type="submit">
-                Send
-              </button>
-            </form>
+          {questionHeading}
+          {q.type === "wordcloud" || q.type === "feedback" ? (
+            <div className="word-form-col">
+              <form
+                className="word-form"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (text.trim()) void submit(text);
+                }}
+              >
+                {q.type === "feedback" ? (
+                  <textarea
+                    className="textarea"
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    maxLength={500}
+                    rows={4}
+                    placeholder="Share your thoughts…"
+                    autoFocus
+                  />
+                ) : (
+                  <input
+                    value={text}
+                    onChange={(e) => setText(e.target.value)}
+                    maxLength={40}
+                    placeholder="Type one or two words…"
+                    autoFocus
+                  />
+                )}
+                <button className="primary" type="submit" disabled={submitting}>
+                  Send
+                </button>
+              </form>
+              {multiEntry && entries.length > 0 && (
+                <div className="entries">
+                  <p className="muted small">Your entries:</p>
+                  <div className="entry-chips">
+                    {entries.map((r, i) => (
+                      <span key={i} className="chip">
+                        {r.value}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {multiEntry && (
+                <p className="muted small">You can submit as many entries as you like.</p>
+              )}
+            </div>
           ) : (
             <div className="answers">
               {(q.options ?? []).map((opt, i) => (
-                <button key={i} className="answer-button" onClick={() => void submit(i)}>
+                <button
+                  key={i}
+                  className="answer-button"
+                  onClick={() => void submit(i)}
+                  disabled={submitting}
+                >
                   {opt}
                 </button>
               ))}
@@ -114,18 +179,42 @@ export default function Play() {
         </div>
       )}
 
+      {data.status === "active" && q && q.type === "quiz" && timeUp && !answered && (
+        <div className="card center">
+          <h1>Time&apos;s up!</h1>
+          <p className="muted">Waiting for the presenter to reveal…</p>
+        </div>
+      )}
+
       {data.status === "active" && q && answered && (
         <div className="card center">
           <h1>Answer recorded ✓</h1>
           {earned != null && earned > 0 && <p>+{earned} points</p>}
-          <p className="muted">Waiting for the presenter to reveal…</p>
+          {multiEntry && entries.length > 0 && (
+            <div className="entry-chips">
+              {entries.map((r, i) => (
+                <span key={i} className="chip">
+                  {r.value}
+                </span>
+              ))}
+            </div>
+          )}
+          <p className="muted">
+            {multiEntry
+              ? "Add more entries above, or wait for the presenter."
+              : "Waiting for the presenter to reveal…"}
+          </p>
         </div>
       )}
 
       {data.status === "revealing" && q && (
         <div className="card">
-          <h1>{q.prompt}</h1>
-          {data.results && <ResultsView results={data.results} question={q} />}
+          {questionHeading}
+          {data.results ? (
+            <ResultsView results={data.results} question={q} />
+          ) : (
+            q.type === "feedback" && <p className="muted">Feedback is visible on the presenter&apos;s screen.</p>
+          )}
           {data.myResponse && data.myResponse.points > 0 && (
             <p className="center">You earned +{data.myResponse.points} points!</p>
           )}

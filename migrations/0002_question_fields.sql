@@ -1,0 +1,4 @@
+ALTER TABLE questions ADD COLUMN title TEXT;
+ALTER TABLE questions ADD COLUMN description TEXT;
+ALTER TABLE questions ADD COLUMN show_leaderboard INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE questions ADD COLUMN allow_multiple INTEGER NOT NULL DEFAULT 0;

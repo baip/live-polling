@@ -10,16 +10,24 @@ interface DraftQuestion extends QuestionInput {
 let nextKey = 1;
 
 function newQuestion(type: QuestionType): DraftQuestion {
-  const base: DraftQuestion = { key: nextKey++, type, prompt: "" };
-  if (type !== "wordcloud") {
+  const base: DraftQuestion = { key: nextKey++, type, prompt: "", title: "", description: "" };
+  if (type === "mc" || type === "quiz") {
     base.options = ["", ""];
     if (type === "quiz") {
       base.correctIndex = 0;
       base.timeLimitSec = 20;
     }
   }
+  if (type === "wordcloud") base.allowMultiple = false;
   return base;
 }
+
+const TYPE_LABELS: Record<QuestionType, string> = {
+  mc: "Multiple choice",
+  wordcloud: "Word cloud",
+  quiz: "Quiz",
+  feedback: "Feedback",
+};
 
 export default function Create() {
   const [title, setTitle] = useState("My presentation");
@@ -71,7 +79,7 @@ export default function Create() {
     for (const [i, q] of questions.entries()) {
       const label = `Question ${i + 1}`;
       if (!q.prompt.trim()) return `${label}: prompt is required.`;
-      if (q.type !== "wordcloud") {
+      if (q.type === "mc" || q.type === "quiz") {
         const opts = (q.options ?? []).map((o) => o.trim());
         if (opts.length < 2 || opts.some((o) => !o))
           return `${label}: needs at least 2 non-empty options.`;
@@ -94,6 +102,8 @@ export default function Create() {
         questions: questions.map(({ key: _key, ...q }) => ({
           ...q,
           prompt: q.prompt.trim(),
+          title: q.title?.trim() || undefined,
+          description: q.description?.trim() || undefined,
           options: q.options?.map((o) => o.trim()),
         })),
       };
@@ -119,8 +129,7 @@ export default function Create() {
         <section key={q.key} className="card">
           <div className="card-header">
             <h2>
-              {qi + 1}.{" "}
-              {q.type === "mc" ? "Multiple choice" : q.type === "quiz" ? "Quiz" : "Word cloud"}
+              {qi + 1}. {TYPE_LABELS[q.type]}
             </h2>
             {questions.length > 1 && (
               <button
@@ -133,12 +142,34 @@ export default function Create() {
           </div>
 
           <label className="field">
+            <span>Title (optional)</span>
+            <input
+              value={q.title ?? ""}
+              onChange={(e) => update(q.key, { title: e.target.value })}
+              maxLength={120}
+              placeholder="Short headline"
+            />
+          </label>
+
+          <label className="field">
             <span>Prompt</span>
             <input
               value={q.prompt}
               onChange={(e) => update(q.key, { prompt: e.target.value })}
               maxLength={300}
               placeholder="What should the audience answer?"
+            />
+          </label>
+
+          <label className="field">
+            <span>Description (optional)</span>
+            <textarea
+              className="textarea"
+              value={q.description ?? ""}
+              onChange={(e) => update(q.key, { description: e.target.value })}
+              maxLength={1000}
+              rows={2}
+              placeholder="Extra context shown to voters"
             />
           </label>
 
@@ -194,6 +225,26 @@ export default function Create() {
               />
             </label>
           )}
+
+          {q.type === "wordcloud" && (
+            <label className="checkbox-field">
+              <input
+                type="checkbox"
+                checked={!!q.allowMultiple}
+                onChange={(e) => update(q.key, { allowMultiple: e.target.checked })}
+              />
+              <span>Allow multiple entries per participant</span>
+            </label>
+          )}
+
+          <label className="checkbox-field">
+            <input
+              type="checkbox"
+              checked={!!q.showLeaderboard}
+              onChange={(e) => update(q.key, { showLeaderboard: e.target.checked })}
+            />
+            <span>Show leaderboard after this question</span>
+          </label>
         </section>
       ))}
 
@@ -206,6 +257,9 @@ export default function Create() {
         </button>
         <button className="secondary" onClick={() => addQuestion("quiz")}>
           + Quiz
+        </button>
+        <button className="secondary" onClick={() => addQuestion("feedback")}>
+          + Feedback
         </button>
       </div>
 
